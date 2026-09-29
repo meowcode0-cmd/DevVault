@@ -116,7 +116,7 @@ function iso(offsetDays) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function demoData() {
+function demoData(profileName = "") {
   const now = Date.now();
   const projects = [
     { id: uid(), name: "Polyglot Notes", description: "A markdown note app that renders the same note in three human languages side by side.", stack: ["React", "TypeScript", "PostgreSQL"], status: "building", progress: 62, priority: "high", deadline: iso(21), createdAt: now - 86400000 * 12 },
@@ -158,7 +158,7 @@ function demoData() {
     if (Math.random() < 0.45) dsa[iso(-i)] = 1 + Math.floor(Math.random() * 4);
   }
   dsa[todayISO()] = 3;
-  return { version: SCHEMA_VERSION, profile: { name: "Dana", theme: "night", createdAt: now }, projects, tasks, snippets, resources, dsa, activity: buildDemoActivity(projects, tasks, snippets, resources, now) };
+  return { version: SCHEMA_VERSION, profile: { name: String(profileName || "").trim().slice(0, 40), theme: "night", createdAt: now }, projects, tasks, snippets, resources, dsa, activity: buildDemoActivity(projects, tasks, snippets, resources, now) };
 }
 
 function buildDemoActivity(projects, tasks, snippets, resources, now) {
@@ -175,6 +175,24 @@ function buildDemoActivity(projects, tasks, snippets, resources, now) {
 /* ------------------------------------------------------------
    2. Store
    ------------------------------------------------------------ */
+function emptyVaultData() {
+  const savedPrefs = storage.get(PREF_KEY, {});
+  return {
+    version: SCHEMA_VERSION,
+    profile: {
+      name: "",
+      theme: savedPrefs?.theme === "day" ? "day" : "night",
+      createdAt: Date.now()
+    },
+    projects: [],
+    tasks: [],
+    snippets: [],
+    resources: [],
+    dsa: {},
+    activity: []
+  };
+}
+
 const Store = {
   data: null,
   listeners: [],
@@ -184,10 +202,13 @@ const Store = {
     if (saved && typeof saved === "object" && Array.isArray(saved.projects)) {
       this.data = normalizeData(saved);
     } else {
-      this.data = demoData();
-      this.save();
+      this.data = emptyVaultData();
     }
     return this.data;
+  },
+
+  needsOnboarding() {
+    return !String(this.data?.profile?.name || "").trim();
   },
 
   save() {
@@ -201,16 +222,24 @@ const Store = {
   commit() { this.save(); this.listeners.forEach((fn) => fn()); },
   onChange(fn) { this.listeners.push(fn); },
 
-  resetDemo() { this.data = demoData(); this.commit(); },
+  resetDemo() {
+    const name = this.data?.profile?.name || "";
+    const theme = this.data?.profile?.theme || "night";
+    this.data = demoData(name);
+    this.data.profile.theme = theme;
+    this.commit();
+  },
   wipeAll() {
-    this.data = { version: SCHEMA_VERSION, profile: { name: "Developer", theme: this.data?.profile?.theme || "night", createdAt: Date.now() }, projects: [], tasks: [], snippets: [], resources: [], dsa: {}, activity: [] };
+    const theme = this.data?.profile?.theme || "night";
+    this.data = emptyVaultData();
+    this.data.profile.theme = theme;
     this.commit();
   },
 
   importPayload(raw) {
     const clean = normalizeData(raw, { requireStrict: true });
     if (!clean) throw new Error("This file is not a valid DevVault export.");
-    clean.profile = { name: clean.profile?.name || "Developer", theme: Prefs.theme, createdAt: clean.profile?.createdAt || Date.now() };
+    clean.profile = { name: clean.profile?.name || "", theme: Prefs.theme, createdAt: clean.profile?.createdAt || Date.now() };
     this.data = clean;
     this.commit();
   },
@@ -236,7 +265,7 @@ function normalizeData(input, { requireStrict = false } = {}) {
     const base = {
       version: num(input.version, SCHEMA_VERSION),
       profile: {
-        name: str(input.profile?.name, "Developer").slice(0, 40) || "Developer",
+        name: str(input.profile?.name).slice(0, 40),
         theme: input.profile?.theme === "day" ? "day" : "night",
         createdAt: num(input.profile?.createdAt, Date.now())
       },
@@ -389,6 +418,51 @@ function confirmModal({ title, message, confirmLabel = "Confirm", danger = false
   });
 }
 
+function openOnboarding() {
+  Modal.open(`
+    <div class="modal-head">
+      <div>
+        <h3>Welcome to DevVault</h3>
+        <p class="modal-sub">Your command center starts with your name.</p>
+      </div>
+    </div>
+    <form id="onboarding-form">
+      <div class="form-field">
+        <label for="onboarding-name">What should we call you? <span class="req">*</span></label>
+        <input id="onboarding-name" name="name" maxlength="40" placeholder="Your name" autocomplete="name" />
+        <span class="field-err">Add a name to enter your vault.</span>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-primary" type="submit">Enter DevVault</button>
+      </div>
+    </form>`,
+    {
+      onMount(holder) {
+        const form = $("#onboarding-form", holder);
+        const input = $("#onboarding-name", holder);
+        form.addEventListener("submit", (e) => {
+          e.preventDefault();
+          const name = input.value.trim();
+          const field = input.closest(".form-field");
+          if (!name) {
+            field.classList.add("invalid");
+            input.focus();
+            return;
+          }
+          Store.data.profile.name = name.slice(0, 40);
+          Store.commit();
+          Modal.close();
+          updateSideUser();
+          route();
+          animateMeters();
+          toast(`Welcome, ${Store.data.profile.name}`);
+        });
+        input.addEventListener("input", () => input.closest(".form-field").classList.remove("invalid"));
+      }
+    }
+  );
+}
+
 /* ------------------------------------------------------------
    6. Syntax highlighter (small, regex-based, token-safe)
    ------------------------------------------------------------ */
@@ -495,9 +569,10 @@ function updateVaultMeter() {
 }
 
 function updateSideUser() {
-  const name = Store.data.profile.name || "Developer";
+  const name = Store.data.profile.name.trim();
   $("#side-username").textContent = name;
-  $("#side-avatar").textContent = name.trim().charAt(0).toUpperCase() || "D";
+  $("#side-username").textContent = name || "Your vault";
+  $("#side-avatar").textContent = name.charAt(0).toUpperCase() || "?";
 }
 
 function setView(id) {
@@ -1819,7 +1894,10 @@ function wireGlobal() {
     const closest = (sel) => t.closest(sel);
 
     // modal close
-    if (t.closest("[data-close-modal]")) { Modal.close(); return; }
+    if (t.closest("[data-close-modal]")) {
+      if (!Store.needsOnboarding()) Modal.close();
+      return;
+    }
     if (t.closest("[data-close-search]")) { Search.close(); return; }
 
     // nav / goto
@@ -1903,7 +1981,7 @@ function wireGlobal() {
     }
     if (e.key === "Escape") {
       if (!$("#search-layer").hidden) Search.close();
-      else if (!$("#modal-layer").hidden) Modal.close();
+      else if (!$("#modal-layer").hidden && !Store.needsOnboarding()) Modal.close();
       else closeSidebar();
     }
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
@@ -2046,5 +2124,6 @@ Store.onChange(() => { buildNav(); });
   updateSideUser();
   route();
   animateMeters();
+  if (Store.needsOnboarding()) openOnboarding();
   setTimeout(() => $("#boot-loader").classList.add("done"), 140);
 })();
